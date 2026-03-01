@@ -3904,6 +3904,10 @@ elif selected_tab == "Caso Individual":
         with st.container(border=True):
             st.markdown("### 🫀 Paso 2: Parámetros Cardiacos")
             st.markdown("*Valores del ecocardiograma*")
+
+            ivs_value = float(safe_float(st.session_state.form_data.get('ivs', 0.0)))
+            volt_value = float(safe_float(st.session_state.form_data.get('volt', 0.0)))
+            gls_value = float(safe_float(st.session_state.form_data.get('gls', -15.0)))
             
             p_col1, p_col2, p_col3 = st.columns(3, gap="small")
             
@@ -3911,7 +3915,7 @@ elif selected_tab == "Caso Individual":
                 st.session_state.form_data['ivs'] = st.number_input(
                     "IVS (mm)",
                     min_value=0.0, max_value=30.0, step=0.1,
-                    value=st.session_state.form_data['ivs'],
+                    value=ivs_value,
                     help="Grosor pared VI. Normal <11mm"
                 )
             
@@ -3919,7 +3923,7 @@ elif selected_tab == "Caso Individual":
                 st.session_state.form_data['volt'] = st.number_input(
                     "Voltaje (mV)",
                     min_value=0.0, max_value=2.0, step=0.01,
-                    value=st.session_state.form_data['volt'],
+                    value=volt_value,
                     help="Amplitud máxima QRS en ECG"
                 )
             
@@ -3927,7 +3931,7 @@ elif selected_tab == "Caso Individual":
                 st.session_state.form_data['gls'] = st.number_input(
                     "GLS (%)",
                     min_value=-30.0, max_value=0.0, step=0.5,
-                    value=st.session_state.form_data['gls'],
+                    value=gls_value,
                     help="Strain longitudinal global (-15% a -20% normal)"
                 )
         
