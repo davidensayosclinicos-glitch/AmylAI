@@ -1495,6 +1495,7 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
     """Capa de seguridad Regex + Censor Universal V3 (Fix Microvoltajes, BAV, Biomarcadores, RM)"""
     texto_norm = normalizar_numeros_texto_clinico(texto)
     t = texto_norm.lower()
+    t_ascii = _normalizar_palabra_numero_es(t)
 
     # --- A. RESCATE DE POSITIVOS (Keywords que la IA ignora) ---
     
@@ -1520,7 +1521,7 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
                     datos['volt'] = val
 
     # Si el texto afirma voltaje conservado/normal, anula bajo voltaje
-    if re.search(r"(voltajes?\s+(conservados?|normales?)|sin\s+bajo\s+voltaje|no\s+bajo\s+voltaje)", t):
+    if re.search(r"(voltajes?\s+(conservados?|normales?)|sin\s+bajo\s+voltaje|no\s+bajo\s+voltaje)", t) or re.search(r"(voltajes?\s+(conservados?|normales?)|sin\s+bajo\s+voltaje|no\s+bajo\s+voltaje)", t_ascii):
         datos['bajo_voltaje'] = False
         if safe_float(datos.get('volt', 0)) == 0:
             datos['volt'] = 1.1
@@ -1569,7 +1570,7 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
                 datos['edad'] = edad
     
     # LGE Patrón (Resonancia) - negación dominante aunque venga marcado por LLM
-    if re.search(r"(sin|niega|no|ausencia de).{0,80}(subendocardic|transmural|difuso|parcheado|realce tard[ií]o)", t):
+    if re.search(r"(sin|niega|no|ausencia de).{0,120}(subendocardic|transmural|difuso|parcheado|realce tard[ií]o)", t) or re.search(r"(sin|niega|no|ausencia de).{0,120}(subendocardic|transmural|difuso|parcheado|realce tardio)", t_ascii):
         datos['lge_patron'] = ""
     elif not datos.get('lge_patron') or datos.get('lge_patron') == '':
         if "subendocárdico" in t or "subendocardico" in t:
@@ -1588,16 +1589,16 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
         if not re.search(r"(no |ausencia|negativ).{0,30}(monoclonal|inmunofijación|banda|pico)", t):
             datos['mgus'] = True
 
-    if re.search(r"\bmacroglosia\b|\bimprontas\b", t):
-        if not re.search(r"(niega|sin|no|ausencia de).{0,60}(macroglosia|improntas)", t):
+    if re.search(r"\bmacroglosia\b|\bimprontas\b", t) or re.search(r"\bmacroglosia\b|\bimprontas\b", t_ascii):
+        if not (re.search(r"(niega|sin|no|ausencia de).{0,80}(macroglosia|improntas)", t) or re.search(r"(niega|sin|no|ausencia de).{0,80}(macroglosia|improntas)", t_ascii)):
             datos['macro'] = True
 
-    if re.search(r"\bpurpura\b|\bpúrpura\b|periorbital", t):
-        if not re.search(r"(niega|sin|no|ausencia de).{0,60}(purpura|púrpura|periorbital)", t):
+    if re.search(r"\bpurpura\b|\bpúrpura\b|periorbital", t) or re.search(r"\bpurpura\b|periorbital", t_ascii):
+        if not (re.search(r"(niega|sin|no|ausencia de).{0,80}(purpura|púrpura|periorbital)", t) or re.search(r"(niega|sin|no|ausencia de).{0,80}(purpura|periorbital)", t_ascii)):
             datos['purpura'] = True
 
     # Biauricular: no inferir por aurícula izquierda aislada
-    if re.search(r"aur[ií]cula\s+izquierda", t) and not re.search(r"biatrial|biauricular|ambas\s+aur[ií]culas", t):
+    if (re.search(r"aur[ií]cula\s+izquierda", t) or re.search(r"auricula\s+izquierda", t_ascii)) and not (re.search(r"biatrial|biauricular|ambas\s+aur[ií]culas", t) or re.search(r"biatrial|biauricular|ambas\s+auriculas", t_ascii)):
         datos['biatrial'] = False
 
     # --- B. CENSOR DE ALUCINACIONES (Correcciones lógicas) ---
