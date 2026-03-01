@@ -1493,7 +1493,8 @@ def validar_rangos_clinicos(datos: Dict[str, Any]) -> Dict[str, Any]:
 
 def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]:
     """Capa de seguridad Regex + Censor Universal V3 (Fix Microvoltajes, BAV, Biomarcadores, RM)"""
-    t = texto.lower()
+    texto_norm = normalizar_numeros_texto_clinico(texto)
+    t = texto_norm.lower()
 
     # --- A. RESCATE DE POSITIVOS (Keywords que la IA ignora) ---
     
@@ -1707,7 +1708,8 @@ def motor_nlp_hibrido(texto: str, use_llm: bool = True) -> Dict[str, Any]:
     if not texto.strip():
         return datos
     
-    texto_lower = texto.lower()
+    texto_normalizado = normalizar_numeros_texto_clinico(texto)
+    texto_lower = texto_normalizado.lower()
     
     # ===== PASO 1: REGEX PARA DATOS NUMÉRICOS CLAROS (Muy rápido) =====
     
@@ -1841,6 +1843,7 @@ def motor_nlp_hibrido(texto: str, use_llm: bool = True) -> Dict[str, Any]:
 {json.dumps({k: datos[k] for k in campos_faltantes})}
 
 Texto: \"\"\"{texto}\"\"\"
+Texto normalizado: \"\"\"{texto_normalizado}\"\"\"
 
 Responde solo con JSON válido, reemplazando valores NULL por los encontrados.
 No agregues campos adicionales."""
@@ -1883,6 +1886,7 @@ def motor_nlp_contextual(texto: str) -> Dict[str, Any]:
     """Motor NLP V4: Máxima precisión - LLM con instrucciones mejoradas"""
     if not texto.strip(): 
         return DEFAULT_DATA.copy()
+    texto_normalizado = normalizar_numeros_texto_clinico(texto)
     
     modelo_usado = f"🤖 {llm_model} + Regex ({backend_activo or 'LLM'})"
 
@@ -1983,6 +1987,9 @@ Salida:
 ### AHORA ANALIZA ESTE TEXTO:
 \"\"\"{texto}\"\"\"
 
+### TEXTO NORMALIZADO (apoyo para números en palabras):
+\"\"\"{texto_normalizado}\"\"\"
+
 RESPONDE SOLO CON JSON VÁLIDO. Rellena TODOS los campos."""
 
         data_ia = solicitar_json_llm(prompt, model=llm_model)
@@ -1991,6 +1998,39 @@ RESPONDE SOLO CON JSON VÁLIDO. Rellena TODOS los campos."""
         # Fusión conservadora: LLM primero, regex solo rescata señales confiables
         base_regex = motor_nlp_hibrido(texto, use_llm=False)
         datos_filtrados = fusionar_llm_regex_conservador(datos_filtrados, base_regex)
+
+        # Segunda pasada focalizada para campos críticos aún vacíos
+        campos_criticos = ['ivs', 'edad', 'gls', 'nt_probnp', 'lge_patron', 'volt']
+        campos_faltantes = [
+            k for k in campos_criticos
+            if (k != 'lge_patron' and safe_float(datos_filtrados.get(k, 0)) == 0)
+            or (k == 'lge_patron' and str(datos_filtrados.get(k, '')).strip() == '')
+        ]
+        if campos_faltantes:
+            prompt_rescate = f"""Extrae SOLO estos campos faltantes en JSON válido:
+{json.dumps({k: datos_filtrados.get(k, DEFAULT_DATA.get(k)) for k in campos_faltantes})}
+
+Texto clínico original: \"\"\"{texto}\"\"\"
+Texto clínico normalizado: \"\"\"{texto_normalizado}\"\"\"
+
+Reglas:
+- No inventar datos.
+- Si no hay evidencia explícita, dejar valor por defecto.
+- Responder SOLO JSON.
+"""
+            data_rescate = solicitar_json_llm(prompt_rescate, model=llm_model)
+            data_rescate = normalizar_extraccion_llm(
+                data_rescate,
+                only_keys=campos_faltantes,
+                base_data={k: datos_filtrados.get(k, DEFAULT_DATA.get(k)) for k in campos_faltantes}
+            )
+            for k in campos_faltantes:
+                v = data_rescate.get(k, DEFAULT_DATA.get(k))
+                if k == 'lge_patron':
+                    if str(v).strip() != '':
+                        datos_filtrados[k] = v
+                elif safe_float(v) != safe_float(DEFAULT_DATA.get(k, 0)):
+                    datos_filtrados[k] = v
 
         # Validación final determinista (respaldo adicional)
         resultado_final = correccion_determinista(texto, datos_filtrados)
@@ -2137,6 +2177,78 @@ def safe_float(val: Any) -> float:
 def safe_bool(d: Dict[str, Any], key: str) -> bool:
     val = d.get(key)
     return val in [True, 1, "1", "true", "True", "yes", "YES"]
+
+
+def _normalizar_palabra_numero_es(texto: str) -> str:
+    rep = {
+        'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u', 'ü': 'u',
+    }
+    t = str(texto or '').lower().strip()
+    for a, b in rep.items():
+        t = t.replace(a, b)
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def _parse_numero_es(frase: str) -> Optional[int]:
+    """Convierte números en texto español (0-199 aprox) a entero."""
+    s = _normalizar_palabra_numero_es(frase)
+    if not s:
+        return None
+
+    direct = {
+        'cero': 0, 'un': 1, 'uno': 1, 'una': 1, 'dos': 2, 'tres': 3, 'cuatro': 4,
+        'cinco': 5, 'seis': 6, 'siete': 7, 'ocho': 8, 'nueve': 9, 'diez': 10,
+        'once': 11, 'doce': 12, 'trece': 13, 'catorce': 14, 'quince': 15,
+        'dieciseis': 16, 'diecisiete': 17, 'dieciocho': 18, 'diecinueve': 19,
+        'veinte': 20, 'veintiuno': 21, 'veintiun': 21, 'veintidos': 22, 'veintitres': 23,
+        'veinticuatro': 24, 'veinticinco': 25, 'veintiseis': 26, 'veintisiete': 27,
+        'veintiocho': 28, 'veintinueve': 29, 'treinta': 30, 'cuarenta': 40,
+        'cincuenta': 50, 'sesenta': 60, 'setenta': 70, 'ochenta': 80, 'noventa': 90,
+        'cien': 100, 'ciento': 100,
+    }
+    if s in direct:
+        return direct[s]
+
+    if ' y ' in s:
+        a, b = [x.strip() for x in s.split(' y ', 1)]
+        if a in direct and b in direct:
+            return direct[a] + direct[b]
+
+    if s.startswith('ciento '):
+        rem = s.replace('ciento ', '', 1).strip()
+        if rem in direct:
+            return 100 + direct[rem]
+        if ' y ' in rem:
+            a, b = [x.strip() for x in rem.split(' y ', 1)]
+            if a in direct and b in direct:
+                return 100 + direct[a] + direct[b]
+
+    return None
+
+
+def normalizar_numeros_texto_clinico(texto: str) -> str:
+    """Reescribe expresiones numéricas en palabras a dígitos para facilitar regex/LLM."""
+    if not texto:
+        return texto
+
+    unidades = r"(?:años?|a\u00f1os?|mm|cm|mV|pg/ml|pg\/ml|%|por ciento)"
+    patron = re.compile(
+        rf"\b([a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]+(?:\s+y\s+[a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]+)?(?:\s+[a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]+)?)\s+({unidades})\b",
+        flags=re.IGNORECASE
+    )
+
+    def repl(m: re.Match) -> str:
+        expr = m.group(1)
+        uni = m.group(2)
+        n = _parse_numero_es(expr)
+        if n is None:
+            return m.group(0)
+        return f"{n} {uni}"
+
+    texto_out = patron.sub(repl, texto)
+    texto_out = re.sub(r"\bmenos\s+(\d+(?:[\.,]\d+)?)\b", r"-\1", texto_out, flags=re.IGNORECASE)
+    return texto_out
 
 
 def parsear_json_llm(content: Any) -> Dict[str, Any]:
