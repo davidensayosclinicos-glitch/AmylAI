@@ -3211,9 +3211,7 @@ with st.sidebar:
 
         logo_bytes = read_file_bytes(logo_path)
         if logo_bytes:
-            col1, col2, col3 = st.columns([1, 3, 1])
-            with col2:
-                st.image(logo_bytes, width=120)
+            st.image(logo_bytes, width=120)
         else:
             st.markdown(f"<h3 style='text-align:center; font-size:3em;'><b>🏥</b></h3>", unsafe_allow_html=True)
     except Exception as e:
@@ -3311,6 +3309,55 @@ page_style = f"""
         padding-bottom: 0.6rem !important;
         padding-left: 0.8rem !important;
         padding-right: 0.8rem !important;
+    }}
+
+    [data-testid="stSidebar"] .sidebar-logo-wrap {{
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin: 0 auto 0.5rem auto;
+        position: relative;
+        left: 50%;
+        transform: translateX(-50%);
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }}
+
+    [data-testid="stSidebar"] .sidebar-logo-wrap img {{
+        width: 120px;
+        max-width: 100%;
+        height: auto;
+        display: block;
+        margin: 0 auto;
+    }}
+
+    [data-testid="stSidebar"] [data-testid="stImage"] {{
+        width: 100% !important;
+        display: flex !important;
+        justify-content: center !important;
+        margin: 0 auto 0.5rem auto !important;
+    }}
+
+    [data-testid="stSidebar"] [data-testid="stImage"] img {{
+        display: block !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }}
+
+    @media (max-width: 768px) {{
+        [data-testid="stSidebar"] .block-container {{
+            padding-left: 0.55rem !important;
+            padding-right: 0.55rem !important;
+        }}
+
+        [data-testid="stSidebar"] .sidebar-logo-wrap {{
+            margin-bottom: 0.4rem;
+        }}
+
+        [data-testid="stSidebar"] .sidebar-logo-wrap img {{
+            width: 110px;
+        }}
     }}
 
     /* Sidebar radio buttons styling */
