@@ -3209,9 +3209,16 @@ with st.sidebar:
         if not os.path.exists(logo_path) and os.path.exists("image_6.png"):
             logo_path = "image_6.png"
 
-        logo_bytes = read_file_bytes(logo_path)
-        if logo_bytes:
-            st.image(logo_bytes, width=120)
+        logo_b64 = read_file_base64(logo_path)
+        if logo_b64:
+            st.markdown(
+                f"""
+                <div class='sidebar-logo-wrap'>
+                    <img src='data:image/png;base64,{logo_b64}' alt='AmylAI Logo' />
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
         else:
             st.markdown(f"<h3 style='text-align:center; font-size:3em;'><b>🏥</b></h3>", unsafe_allow_html=True)
     except Exception as e:
@@ -3312,16 +3319,14 @@ page_style = f"""
     }}
 
     [data-testid="stSidebar"] .sidebar-logo-wrap {{
-        width: 100%;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        margin: 0 auto 0.5rem auto;
-        position: relative;
-        left: 50%;
-        transform: translateX(-50%);
+        width: 100% !important;
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        margin: 0 auto 0.5rem auto !important;
         padding-left: 0 !important;
         padding-right: 0 !important;
+        text-align: center !important;
     }}
 
     [data-testid="stSidebar"] .sidebar-logo-wrap img {{
@@ -3352,7 +3357,7 @@ page_style = f"""
         }}
 
         [data-testid="stSidebar"] .sidebar-logo-wrap {{
-            margin-bottom: 0.4rem;
+            margin-bottom: 0.4rem !important;
         }}
 
         [data-testid="stSidebar"] .sidebar-logo-wrap img {{
