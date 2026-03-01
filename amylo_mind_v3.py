@@ -1562,9 +1562,11 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
             if 0 < edad < 150:
                 datos['edad'] = edad
     
-    # LGE Patrón (Resonancia)
+    # LGE Patrón (Resonancia) - evitar marcar si está negado en el contexto
     if not datos.get('lge_patron') or datos.get('lge_patron') == '':
-        if "subendocárdico" in t or "subendocardico" in t:
+        if re.search(r"(sin|niega|no|ausencia de).{0,80}(subendocardic|transmural|difuso|parcheado|realce tard[ií]o)", t):
+            datos['lge_patron'] = ""
+        elif "subendocárdico" in t or "subendocardico" in t:
             datos['lge_patron'] = "subendocardico"
         elif "transmural" in t:
             datos['lge_patron'] = "transmural"
@@ -1580,9 +1582,13 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
         if not re.search(r"(no |ausencia|negativ).{0,30}(monoclonal|inmunofijación|banda|pico)", t):
             datos['mgus'] = True
 
-    if "macroglosia" in t or "improntas" in t:
-        if "no " not in t and "sin " not in t:
+    if re.search(r"\bmacroglosia\b|\bimprontas\b", t):
+        if not re.search(r"(niega|sin|no|ausencia de).{0,60}(macroglosia|improntas)", t):
             datos['macro'] = True
+
+    if re.search(r"\bpurpura\b|\bpúrpura\b|periorbital", t):
+        if not re.search(r"(niega|sin|no|ausencia de).{0,60}(purpura|púrpura|periorbital)", t):
+            datos['purpura'] = True
 
     # --- B. CENSOR DE ALUCINACIONES (Correcciones lógicas) ---
     
@@ -1640,7 +1646,7 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
             datos['fatiga'] = True
 
     # --- C. CENSOR UNIVERSAL (Negaciones estándar) ---
-    patron_base = r"(niega|no |sin |ausencia|descarta|normal|negativo).{0,40}?"
+    patron_base = r"(niega|no |sin |ausencia|descarta|normal|negativo).{0,120}?"
 
     for k, v_str in TERMINOLOGIA_MEDICA.items():
         # Si el dato está marcado como True, verificamos que no sea un falso positivo por negación
