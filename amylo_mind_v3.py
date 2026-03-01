@@ -1628,7 +1628,7 @@ def fusionar_extracciones(extracciones: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ==========================================
 # MOTOR NLP HÍBRIDO (RÁPIDO Y PRECISO)
 # ==========================================
-def motor_nlp_hibrido(texto: str) -> Dict[str, Any]:
+def motor_nlp_hibrido(texto: str, use_llm: bool = True) -> Dict[str, Any]:
     """
     Motor HÍBRIDO: Regex (rápido) + LLM (preciso) donde falta.
     Tiempo: 2-5s (mucho mejor que 10-30s del LLM puro).
@@ -1767,7 +1767,7 @@ def motor_nlp_hibrido(texto: str) -> Dict[str, Any]:
     campos_criticos = ['ivs', 'edad', 'gls', 'nt_probnp', 'lge_patron']
     campos_faltantes = [k for k in campos_criticos if (datos[k] == 0 and k != 'lge_patron') or (k == 'lge_patron' and datos[k] == '')]
     
-    if campos_faltantes and client:
+    if campos_faltantes and client and use_llm:
         # Solo usar LLM para campos que regex NO pudo extraer
         prompt_mini = f"""Extrae SOLO estos campos del texto en JSON válido:
 {json.dumps({k: datos[k] for k in campos_faltantes})}
@@ -1778,15 +1778,7 @@ Responde solo con JSON válido, reemplazando valores NULL por los encontrados.
 No agregues campos adicionales."""
         
         try:
-            r = client.chat.completions.create(
-                model=llm_model,
-                messages=[{"role": "user", "content": prompt_mini}],
-                temperature=0,
-                response_format={"type": "json_object"},
-                stream=False
-            )
-            raw_content = r.choices[0].message.content if r and r.choices else ""
-            data_ia = parsear_json_llm(raw_content)
+            data_ia = solicitar_json_llm(prompt_mini, model=llm_model)
             data_ia = normalizar_extraccion_llm(
                 data_ia,
                 only_keys=campos_faltantes,
@@ -1809,7 +1801,10 @@ No agregues campos adicionales."""
     elif re.search(r'difuso', texto_lower):
         datos['lge_patron'] = 'difuso'
 
-    datos['_modelo'] = f"🧠 Híbrido ({backend_activo or 'LLM'})" if client else "🛡️ Regex (LLM no disponible)"
+    if client and use_llm:
+        datos['_modelo'] = f"🧠 Híbrido ({backend_activo or 'LLM'})"
+    else:
+        datos['_modelo'] = "🛡️ Regex (LLM no disponible)"
     
     return datos
 
@@ -1821,7 +1816,7 @@ def motor_nlp_contextual(texto: str) -> Dict[str, Any]:
     if not texto.strip(): 
         return DEFAULT_DATA.copy()
     
-    modelo_usado = f"🤖 {llm_model} ({backend_activo or 'LLM'})"
+    modelo_usado = f"🤖 {llm_model} + Regex ({backend_activo or 'LLM'})"
 
     if not client:
         datos = correccion_determinista(texto, {})
@@ -1920,17 +1915,22 @@ Salida:
 
 RESPONDE SOLO CON JSON VÁLIDO. Rellena TODOS los campos."""
 
-        r = client.chat.completions.create(
-            model=llm_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            response_format={"type": "json_object"}
-        )
-
-        # Procesamiento
-        raw_content = r.choices[0].message.content
-        data_ia = parsear_json_llm(raw_content)
+        data_ia = solicitar_json_llm(prompt, model=llm_model)
         datos_filtrados = normalizar_extraccion_llm(data_ia)
+
+        # Fusión conservadora para comportamiento más estable (similar a extracción local)
+        base_regex = motor_nlp_hibrido(texto, use_llm=False)
+        for key, default_val in DEFAULT_DATA.items():
+            base_val = base_regex.get(key, default_val)
+            if isinstance(default_val, bool):
+                if bool(base_val):
+                    datos_filtrados[key] = True
+            elif isinstance(default_val, (int, float)):
+                if safe_float(base_val) != safe_float(default_val):
+                    datos_filtrados[key] = base_val
+            else:
+                if str(base_val).strip() != str(default_val).strip():
+                    datos_filtrados[key] = base_val
 
         # Validación final determinista (respaldo adicional)
         resultado_final = correccion_determinista(texto, datos_filtrados)
@@ -2165,6 +2165,36 @@ def normalizar_extraccion_llm(
 
     salida = validar_rangos_clinicos(salida)
     return salida
+
+
+def solicitar_json_llm(prompt: str, model: Optional[str] = None) -> Dict[str, Any]:
+    """Solicita extracción JSON al LLM con parámetros deterministas y fallback seguro."""
+    if not client:
+        return {}
+
+    model_name = model or llm_model
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "top_p": 1,
+    }
+
+    try:
+        r = client.chat.completions.create(
+            **payload,
+            response_format={"type": "json_object"},
+            stream=False,
+        )
+        raw_content = r.choices[0].message.content if r and r.choices else ""
+        return parsear_json_llm(raw_content)
+    except Exception:
+        try:
+            r = client.chat.completions.create(**payload, stream=False)
+            raw_content = r.choices[0].message.content if r and r.choices else ""
+            return parsear_json_llm(raw_content)
+        except Exception:
+            return {}
 
 
 # ------------------------------------------------------------------------------
