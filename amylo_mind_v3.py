@@ -1499,8 +1499,15 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
     
     # FIX VOLTAJE: Añadimos "microvoltaje" como disparador directo
     if not datos.get('volt'):
-        if "bajo voltaje" in t or "microvoltaje" in t: 
+        if (
+            "bajo voltaje" in t
+            or "microvoltaje" in t
+            or "voltajes eléctricos anormalmente bajos" in t
+            or "voltajes anormalmente bajos" in t
+            or "voltajes bajos" in t
+        ):
             datos['volt'] = 0.4
+            datos['bajo_voltaje'] = True
         else:
             # Busca "QRS de X mm" o "Voltaje de X mV"
             match = re.search(r"(voltaje|qrs).{0,15}?(\d+[,.]?\d*)", t)
@@ -1519,6 +1526,16 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
             val = float(match.group(2).replace(',', '.'))
             if val > 0:
                 datos['nt_probnp'] = val
+        elif (
+            "nt-probnp" in t or "nt probnp" in t or "bnp" in t
+        ) and (
+            "marcadamente elevado" in t
+            or "muy elevado" in t
+            or "elevado" in t
+            or "elevación marcada" in t
+        ):
+            # Rescate cualitativo cuando no hay cifra explícita
+            datos['nt_probnp'] = 3500.0
     
     # ECV (Volumen Extracelular)
     if not datos.get('ecv'):
@@ -1585,6 +1602,41 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
             # Si es normal (ej: 16), lo deja tal cual
             elif 6 < valor < 30: 
                 datos['ivs'] = valor
+
+    # Rescate de engrosamiento/hipertrofia VI con texto narrativo
+    if not datos.get('ivs'):
+        match = re.search(
+            r"(engrosamiento|hipertrofia).{0,45}?(ventr[íi]culo\s*izquierdo|\bvi\b).{0,20}?(\d+[,.]?\d*)\s*mm",
+            t
+        )
+        if match:
+            valor = float(match.group(3).replace(',', '.'))
+            if 6 < valor < 30:
+                datos['ivs'] = valor
+
+    if not datos.get('ivs'):
+        if ("engrosamiento severo" in t or "hipertrofia severa" in t) and ("ventrículo izquierdo" in t or "ventriculo izquierdo" in t or " vi " in f" {t} "):
+            datos['ivs'] = 16.0
+        elif ("engrosamiento moderado" in t or "hipertrofia moderada" in t) and ("ventrículo izquierdo" in t or "ventriculo izquierdo" in t or " vi " in f" {t} "):
+            datos['ivs'] = 13.0
+
+    # Rescate de síndrome nefrótico/proteinuria severa en texto libre
+    if not datos.get('nefro'):
+        if (
+            "síndrome nefrótico" in t
+            or "sindrome nefrotico" in t
+            or "proteinuria severa" in t
+            or "proteinuria en rango nefrótico" in t
+            or "proteinuria en rango nefrotico" in t
+            or "orina muy espumosa" in t
+            or "orina espumosa" in t
+        ):
+            datos['nefro'] = True
+
+    # Rescate de fatiga severa cualitativa
+    if not datos.get('fatiga'):
+        if "fatiga extrema" in t or "fatiga severa" in t or "agotamiento extremo" in t:
+            datos['fatiga'] = True
 
     # --- C. CENSOR UNIVERSAL (Negaciones estándar) ---
     patron_base = r"(niega|no |sin |ausencia|descarta|normal|negativo).{0,40}?"
