@@ -1,0 +1,31 @@
+# AmyloSCAN PRO v4.3.0-OPTIMIZADO
+# Dependencias principales - actualizado 2026-02-08
+
+# Core & UI
+streamlit>=1.32.0
+pandas>=2.1.0
+numpy>=1.24.0
+
+# Machine Learning & Estadística
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# Computación
+matplotlib>=3.8.0
+seaborn>=0.12.0
+
+# PDF & OCR (OPTIMIZADO para lectura rápida)
+pdfplumber>=0.10.0
+pytesseract>=0.3.10
+pillow>=10.0.0
+pdf2image>=1.16.0
+
+# LLM Integration (para vLLM/Ollama - NUEVO)
+openai>=1.0.0
+
+# Utilidades
+python-dateutil>=2.8.2
+requests>=2.31.0
+
+# ⚡ PRO TIP: Para OCR más rápido en Windows, instala Tesseract:
+# https://github.com/UB-Mannheim/tesseract/wiki
