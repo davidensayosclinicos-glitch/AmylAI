@@ -1781,7 +1781,13 @@ No agregues campos adicionales."""
                 response_format={"type": "json_object"},
                 stream=False
             )
-            data_ia = json.loads(r.choices[0].message.content)
+            raw_content = r.choices[0].message.content if r and r.choices else ""
+            data_ia = parsear_json_llm(raw_content)
+            data_ia = normalizar_extraccion_llm(
+                data_ia,
+                only_keys=campos_faltantes,
+                base_data={k: datos.get(k, DEFAULT_DATA.get(k)) for k in campos_faltantes}
+            )
             # Mezclar: regex tiene prioridad, LLM solo rellena vacíos
             for k in campos_faltantes:
                 if k in data_ia and data_ia[k] is not None:
@@ -1917,41 +1923,8 @@ RESPONDE SOLO CON JSON VÁLIDO. Rellena TODOS los campos."""
 
         # Procesamiento
         raw_content = r.choices[0].message.content
-        data_ia = json.loads(raw_content)
-        
-        # Filtrado y Limpieza
-        datos_filtrados = {k: data_ia.get(k, DEFAULT_DATA[k]) for k in DEFAULT_DATA}
-        
-        # Post-procesado de seguridad
-        datos_filtrados['ivs'] = safe_float(datos_filtrados.get('ivs'))
-        datos_filtrados['volt'] = safe_float(datos_filtrados.get('volt'))
-        val_gls = safe_float(datos_filtrados.get('gls'))
-        datos_filtrados['gls'] = -abs(val_gls) if val_gls != 0 else 0.0
-        
-        # Campos numéricos adicionales
-        datos_filtrados['nt_probnp'] = safe_float(datos_filtrados.get('nt_probnp'))
-        datos_filtrados['ecv'] = safe_float(datos_filtrados.get('ecv'))
-        datos_filtrados['septum_posterior'] = safe_float(datos_filtrados.get('septum_posterior'))
-        
-        # Campos demográficos
-        datos_filtrados['edad'] = int(safe_float(datos_filtrados.get('edad', 0)))
-        datos_filtrados['sexo'] = str(datos_filtrados.get('sexo', '')).upper()[:1]
-        
-        # Campo categórico (LGE)
-        datos_filtrados['lge_patron'] = str(datos_filtrados.get('lge_patron', '')).lower().strip()
-        
-        # Asegurar booleanos y tipos correctos
-        numeric_fields = ['ivs', 'volt', 'gls', 'nt_probnp', 'ecv', 'septum_posterior', 'edad']
-        string_fields = ['sexo', 'lge_patron']
-        
-        for k in datos_filtrados:
-            if k in numeric_fields:
-                continue  # Ya procesados arriba
-            elif k in string_fields:
-                continue  # Ya procesados arriba
-            else:
-                # Booleanos
-                datos_filtrados[k] = bool(datos_filtrados.get(k, False))
+        data_ia = parsear_json_llm(raw_content)
+        datos_filtrados = normalizar_extraccion_llm(data_ia)
 
         # Validación final determinista (respaldo adicional)
         resultado_final = correccion_determinista(texto, datos_filtrados)
@@ -2098,6 +2071,94 @@ def safe_float(val: Any) -> float:
 def safe_bool(d: Dict[str, Any], key: str) -> bool:
     val = d.get(key)
     return val in [True, 1, "1", "true", "True", "yes", "YES"]
+
+
+def parsear_json_llm(content: Any) -> Dict[str, Any]:
+    """Parsea salida de LLM tolerando texto extra y bloques markdown."""
+    if isinstance(content, dict):
+        return content
+
+    text = str(content or "").strip()
+    if not text:
+        return {}
+
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+
+    text_clean = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).strip("` \n")
+    try:
+        obj = json.loads(text_clean)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+
+    m = re.search(r"\{.*\}", text_clean, flags=re.DOTALL)
+    if not m:
+        return {}
+
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def normalizar_extraccion_llm(
+    data_ia: Dict[str, Any],
+    only_keys: Optional[List[str]] = None,
+    base_data: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Normaliza tipos y rangos de la extracción de IA con DEFAULT_DATA como contrato."""
+    keys = list(only_keys) if only_keys else list(DEFAULT_DATA.keys())
+    base = (base_data or DEFAULT_DATA).copy()
+    salida: Dict[str, Any] = {}
+    truthy = {"1", "true", "yes", "si", "sí", "positivo", "presente"}
+
+    for key in keys:
+        default_val = DEFAULT_DATA.get(key, base.get(key, ""))
+        raw_val = data_ia.get(key, base.get(key, default_val))
+
+        if isinstance(default_val, bool):
+            if isinstance(raw_val, bool):
+                salida[key] = raw_val
+            elif isinstance(raw_val, (int, float)):
+                salida[key] = bool(raw_val)
+            else:
+                salida[key] = str(raw_val).strip().lower() in truthy
+        elif isinstance(default_val, int) and not isinstance(default_val, bool):
+            salida[key] = int(round(safe_float(raw_val)))
+        elif isinstance(default_val, float):
+            salida[key] = float(safe_float(raw_val))
+        else:
+            salida[key] = str(raw_val).strip() if raw_val is not None else ""
+
+    if 'gls' in salida:
+        gls_val = safe_float(salida.get('gls'))
+        salida['gls'] = -abs(gls_val) if gls_val != 0 else 0.0
+
+    if 'sexo' in salida:
+        sx = str(salida.get('sexo', '')).upper().strip()
+        salida['sexo'] = sx[:1] if sx[:1] in ('M', 'F') else ''
+
+    if 'lge_patron' in salida:
+        lge = str(salida.get('lge_patron', '')).lower().strip()
+        mapa_lge = {
+            'subendocárdico': 'subendocardico',
+            'subendocardial': 'subendocardico',
+            'transmurale': 'transmural',
+            'diffuse': 'difuso',
+            'patchy': 'parcheado',
+        }
+        salida['lge_patron'] = mapa_lge.get(lge, lge)
+
+    if 'edad' in salida:
+        salida['edad'] = max(0, min(120, int(safe_float(salida.get('edad', 0)))))
+
+    salida = validar_rangos_clinicos(salida)
+    return salida
 
 
 # ------------------------------------------------------------------------------
