@@ -1283,6 +1283,10 @@ try:
     remote_base_url = _get_secret_or_env("LLM_BASE_URL") or _get_secret_or_env("OPENAI_BASE_URL")
     remote_api_key = _get_secret_or_env("LLM_API_KEY") or _get_secret_or_env("OPENAI_API_KEY")
 
+    # Si hay API key pero no base URL, usar OpenAI por defecto (OpenAI-compatible)
+    if remote_api_key and not remote_base_url:
+        remote_base_url = "https://api.openai.com/v1"
+
     if remote_base_url and remote_api_key:
         try:
             remote_base_url = str(remote_base_url).rstrip("/")
