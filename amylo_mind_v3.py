@@ -1855,6 +1855,8 @@ Tu tarea: Extraer datos COMPLETOS de la nota clínica, sin importar cómo esté 
 5. Si dice "niega", "sin", "normal", "ausente" → false
 6. Si menciona síntoma/hallazgo sin negación → true
 7. Para textos ambiguos: interpreta como médico (contexto clínico)
+8. NO inventes ni infieras datos ausentes; usa SOLO evidencia textual explícita.
+9. Si un hallazgo aparece como "descartar", "duda", "probable" o antecedente familiar, NO marcar como presente.
 
 ### CAMPOS NUMÉRICOS (convertir TODO a número):
 - ivs: Grosor septum/septo (en mm, si está en cm multiplicar x10)
@@ -1934,19 +1936,9 @@ RESPONDE SOLO CON JSON VÁLIDO. Rellena TODOS los campos."""
         data_ia = solicitar_json_llm(prompt, model=llm_model)
         datos_filtrados = normalizar_extraccion_llm(data_ia)
 
-        # Fusión conservadora para comportamiento más estable (similar a extracción local)
+        # Fusión conservadora: LLM primero, regex solo rescata señales confiables
         base_regex = motor_nlp_hibrido(texto, use_llm=False)
-        for key, default_val in DEFAULT_DATA.items():
-            base_val = base_regex.get(key, default_val)
-            if isinstance(default_val, bool):
-                if bool(base_val):
-                    datos_filtrados[key] = True
-            elif isinstance(default_val, (int, float)):
-                if safe_float(base_val) != safe_float(default_val):
-                    datos_filtrados[key] = base_val
-            else:
-                if str(base_val).strip() != str(default_val).strip():
-                    datos_filtrados[key] = base_val
+        datos_filtrados = fusionar_llm_regex_conservador(datos_filtrados, base_regex)
 
         # Validación final determinista (respaldo adicional)
         resultado_final = correccion_determinista(texto, datos_filtrados)
@@ -2211,6 +2203,54 @@ def solicitar_json_llm(prompt: str, model: Optional[str] = None) -> Dict[str, An
             return parsear_json_llm(raw_content)
         except Exception:
             return {}
+
+
+def fusionar_llm_regex_conservador(datos_llm: Dict[str, Any], datos_regex: Dict[str, Any]) -> Dict[str, Any]:
+    """Fusiona extracción LLM + regex sin degradar la salida del LLM.
+    - LLM es la fuente principal.
+    - Regex rescata valores numéricos/categóricos cuando LLM devuelve valor por defecto.
+    - Para booleanos, solo rescata hallazgos de alta especificidad.
+    """
+    out = DEFAULT_DATA.copy()
+    out.update(datos_llm or {})
+
+    numeric_keys = {
+        'ivs', 'volt', 'gls', 'nt_probnp', 'ecv', 'septum_posterior', 'edad'
+    }
+    high_specific_bool_keys = {
+        'stc', 'biceps', 'lumbar', 'macro', 'purpura', 'mgus',
+        'mutacion_ttr', 'apical_sparing', 'bajo_voltaje',
+        'bav_mp', 'derrame_pericardico', 'biatrial'
+    }
+
+    for key, default_val in DEFAULT_DATA.items():
+        regex_val = datos_regex.get(key, default_val)
+        llm_val = out.get(key, default_val)
+
+        # Numéricos: regex solo rescata cuando LLM viene en default
+        if key in numeric_keys:
+            if safe_float(llm_val) == safe_float(default_val) and safe_float(regex_val) != safe_float(default_val):
+                out[key] = regex_val
+            continue
+
+        # Categórico LGE: regex rescata cuando LLM no detecta patrón
+        if key == 'lge_patron':
+            if str(llm_val).strip() == '' and str(regex_val).strip() != '':
+                out[key] = regex_val
+            continue
+
+        # Sexo: rescate solo si LLM no lo detecta
+        if key == 'sexo':
+            if str(llm_val).strip() == '' and str(regex_val).strip() in {'M', 'F'}:
+                out[key] = regex_val
+            continue
+
+        # Booleanos: no sobreescribir todo con regex para evitar falsos positivos
+        if isinstance(default_val, bool):
+            if key in high_specific_bool_keys and (not bool(llm_val)) and bool(regex_val):
+                out[key] = True
+
+    return out
 
 
 # ------------------------------------------------------------------------------
