@@ -1519,6 +1519,12 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
                 if 0 < val < 5: 
                     datos['volt'] = val
 
+    # Si el texto afirma voltaje conservado/normal, anula bajo voltaje
+    if re.search(r"(voltajes?\s+(conservados?|normales?)|sin\s+bajo\s+voltaje|no\s+bajo\s+voltaje)", t):
+        datos['bajo_voltaje'] = False
+        if safe_float(datos.get('volt', 0)) == 0:
+            datos['volt'] = 1.1
+
     # RESCATE BIOMARCADORES NUMÉRICOS
     # NT-proBNP
     if not datos.get('nt_probnp'):
@@ -1562,11 +1568,11 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
             if 0 < edad < 150:
                 datos['edad'] = edad
     
-    # LGE Patrón (Resonancia) - evitar marcar si está negado en el contexto
-    if not datos.get('lge_patron') or datos.get('lge_patron') == '':
-        if re.search(r"(sin|niega|no|ausencia de).{0,80}(subendocardic|transmural|difuso|parcheado|realce tard[ií]o)", t):
-            datos['lge_patron'] = ""
-        elif "subendocárdico" in t or "subendocardico" in t:
+    # LGE Patrón (Resonancia) - negación dominante aunque venga marcado por LLM
+    if re.search(r"(sin|niega|no|ausencia de).{0,80}(subendocardic|transmural|difuso|parcheado|realce tard[ií]o)", t):
+        datos['lge_patron'] = ""
+    elif not datos.get('lge_patron') or datos.get('lge_patron') == '':
+        if "subendocárdico" in t or "subendocardico" in t:
             datos['lge_patron'] = "subendocardico"
         elif "transmural" in t:
             datos['lge_patron'] = "transmural"
@@ -1589,6 +1595,10 @@ def correccion_determinista(texto: str, datos: Dict[str, Any]) -> Dict[str, Any]
     if re.search(r"\bpurpura\b|\bpúrpura\b|periorbital", t):
         if not re.search(r"(niega|sin|no|ausencia de).{0,60}(purpura|púrpura|periorbital)", t):
             datos['purpura'] = True
+
+    # Biauricular: no inferir por aurícula izquierda aislada
+    if re.search(r"aur[ií]cula\s+izquierda", t) and not re.search(r"biatrial|biauricular|ambas\s+aur[ií]culas", t):
+        datos['biatrial'] = False
 
     # --- B. CENSOR DE ALUCINACIONES (Correcciones lógicas) ---
     
@@ -1815,7 +1825,10 @@ def motor_nlp_hibrido(texto: str, use_llm: bool = True) -> Dict[str, Any]:
         'apical_sparing': (r'apical\s*sparing|preservación.*apical|sparing.*apical|preserved.*apex', r'sin.*apical|no.*apical'),
         'bajo_voltaje': (r'bajo\s*voltaje|low\s*voltage|microlvoltaje|qrs.*bajo|voltaje.*bajo', r'sin.*voltaje|voltaje.*normal'),
         'bav_mp': (r'bloqueo\s*av|bloqueo\s*atrioventricular|marcapasos|pacemaker|bav\s*(?:completo|alto)', r'sin.*bav|bav.*no'),
-        'biatrial': (r'dilatación.*auri|biatrial|aurícula.*dilatada|auricular.*dilatada', r'sin.*dilatación|aurícula.*normal'),
+        'biatrial': (
+            r'biatrial|biauricular|dilataci[oó]n\s+de\s+ambas\s+aur[ií]culas|ambas\s+aur[ií]culas\s+dilatadas',
+            r'sin.*biauricular|sin.*biatrial|aur[ií]cula\s+izquierda\s+(?:discretamente\s+)?dilatada'
+        ),
         'derrame_pericardico': (r'derrame(?:\s*pericárd)?|pericardial\s*effusion|efusión(?:\s*pericárdica)?', r'sin.*derrame|sin.*efusión|derrame.*no'),
         'troponina': (r'troponina\s*(?:elevada|alta|positive|high|positiva|\+)', r'troponina\s*(?:normal|baja|negativa|-)'),
         'macro': (r'macroglosia|agrandada.*lengua|lengua.*agrandada|enlarged.*tongue', r'sin.*macroglosia|lengua.*normal'),
