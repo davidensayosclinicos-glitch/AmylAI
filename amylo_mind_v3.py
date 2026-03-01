@@ -1237,6 +1237,8 @@ select {{
 client = None
 backend_activo = None
 llm_model = "llama3.2"
+llm_endpoint_activo = ""
+llm_provider_activo = ""
 
 def _get_secret_or_env(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
@@ -1252,7 +1254,7 @@ def _get_secret_or_env(key: str, default: Optional[str] = None) -> Optional[str]
     return default
 
 def _inicializar_llm_local(OpenAI):
-    global client, backend_activo
+    global client, backend_activo, llm_endpoint_activo, llm_provider_activo
     try:
         client = OpenAI(
             base_url="http://localhost:8000/v1",
@@ -1260,6 +1262,8 @@ def _inicializar_llm_local(OpenAI):
         )
         client.models.list()
         backend_activo = "🚀 vLLM (Alto Rendimiento)"
+        llm_endpoint_activo = "http://localhost:8000/v1"
+        llm_provider_activo = "vLLM local"
         return
     except Exception:
         pass
@@ -1271,10 +1275,14 @@ def _inicializar_llm_local(OpenAI):
         )
         client.models.list()
         backend_activo = "🤖 Ollama (Local)"
+        llm_endpoint_activo = "http://localhost:11434/v1"
+        llm_provider_activo = "Ollama local"
         return
     except Exception:
         client = None
         backend_activo = "🛡️ Regex (Sin LLM disponible)"
+        llm_endpoint_activo = ""
+        llm_provider_activo = "Regex/Fallback"
 
 try:
     from openai import OpenAI
@@ -1298,7 +1306,13 @@ try:
                 api_key=str(remote_api_key)
             )
             client.models.list()
-            backend_activo = "☁️ Endpoint remoto (st.secrets)"
+            if "api.openai.com" in remote_base_url:
+                backend_activo = "☁️ OpenAI (st.secrets)"
+                llm_provider_activo = "OpenAI"
+            else:
+                backend_activo = "☁️ Endpoint remoto (st.secrets)"
+                llm_provider_activo = "OpenAI-compatible remoto"
+            llm_endpoint_activo = remote_base_url
         except Exception:
             _inicializar_llm_local(OpenAI)
     else:
@@ -1307,6 +1321,8 @@ try:
 except Exception:
     client = None
     backend_activo = "🛡️ Regex (Sin LLM disponible)"
+    llm_endpoint_activo = ""
+    llm_provider_activo = "Regex/Fallback"
 
 # ==========================================
 # TESAURO OPTIMIZADO (Token efficient)
@@ -3332,6 +3348,10 @@ with st.sidebar:
 
     st.caption(f"Backend IA: {backend_activo or 'No detectado'}")
     st.caption(f"Modelo configurado: {llm_model}")
+    if llm_provider_activo:
+        st.caption(f"Proveedor activo: {llm_provider_activo}")
+    if llm_endpoint_activo:
+        st.caption(f"Endpoint activo: {llm_endpoint_activo}")
     if not client:
         st.info("Modo actual: Regex/Fallback (sin LLM activo)")
     
