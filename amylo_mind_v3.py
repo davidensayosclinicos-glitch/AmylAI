@@ -1804,6 +1804,8 @@ No agregues campos adicionales."""
         datos['lge_patron'] = 'parcheado'
     elif re.search(r'difuso', texto_lower):
         datos['lge_patron'] = 'difuso'
+
+    datos['_modelo'] = f"🧠 Híbrido ({backend_activo or 'LLM'})" if client else "🛡️ Regex (LLM no disponible)"
     
     return datos
 
@@ -1815,7 +1817,7 @@ def motor_nlp_contextual(texto: str) -> Dict[str, Any]:
     if not texto.strip(): 
         return DEFAULT_DATA.copy()
     
-    modelo_usado = "🤖 Llama 3.2 (Máxima Precisión)"
+    modelo_usado = f"🤖 {llm_model} ({backend_activo or 'LLM'})"
 
     if not client:
         datos = correccion_determinista(texto, {})
@@ -3293,6 +3295,11 @@ with st.sidebar:
     Acelera el diagnóstico precoz de esta enfermedad infradiagnosticada, mejorando el pronóstico del paciente.
     </div>
     """, unsafe_allow_html=True)
+
+    st.caption(f"Backend IA: {backend_activo or 'No detectado'}")
+    st.caption(f"Modelo configurado: {llm_model}")
+    if not client:
+        st.info("Modo actual: Regex/Fallback (sin LLM activo)")
     
     st.divider()
     selected_tab = st.radio("Navegacion", tab_labels, index=1)
