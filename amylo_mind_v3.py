@@ -974,7 +974,6 @@ DB_FILE = "tabla_amiloidosis_completada-_1_.csv"  # Tabla de amiloidosis complet
 if not DB_FILE.lower().endswith(".csv"):
     DB_FILE = f"{DB_FILE}.csv"
 
-@st.cache_data(show_spinner=False)
 def read_file_base64(path: str) -> Optional[str]:
     if not os.path.exists(path):
         return None
@@ -984,7 +983,6 @@ def read_file_base64(path: str) -> Optional[str]:
     except Exception:
         return None
 
-@st.cache_data(show_spinner=False)
 def read_file_bytes(path: str) -> Optional[bytes]:
     if not os.path.exists(path):
         return None
@@ -1093,9 +1091,21 @@ if 'migracion_v4_3' not in st.session_state:
 # ==========================================
 
 # Cargar imagen de icono y fondo a base64
-if 'fondo_base64' not in st.session_state or 'icono_base64' not in st.session_state:
-    fondo_path = os.path.join(os.path.dirname(__file__), "fondo_rb_optimizado.jpg")
-    fondo_data = read_file_base64(fondo_path)
+if (
+    'fondo_base64' not in st.session_state or not st.session_state.get('fondo_base64')
+    or 'icono_base64' not in st.session_state or not st.session_state.get('icono_base64')
+):
+    fondo_data = None
+    fondo_candidates = [
+        "fondo_rb_optimizado.jpg",
+        "fondo_rb.jpg",
+        "fondo_lateral.jpg",
+    ]
+    for fondo_name in fondo_candidates:
+        fondo_path = os.path.join(os.path.dirname(__file__), fondo_name)
+        fondo_data = read_file_base64(fondo_path)
+        if fondo_data:
+            break
     st.session_state.fondo_base64 = f"data:image/jpeg;base64,{fondo_data}" if fondo_data else None
 
     icono_path = os.path.join(os.path.dirname(__file__), "image_6.png")
@@ -1106,11 +1116,20 @@ if 'fondo_base64' not in st.session_state or 'icono_base64' not in st.session_st
 fondo_css = ""
 if st.session_state.fondo_base64:
     fondo_css = f"""
+    .stApp {{
+        background-image: url('{st.session_state.fondo_base64}');
+        background-size: cover;
+        background-attachment: fixed;
+        background-repeat: no-repeat;
+        background-position: center;
+    }}
+
     [data-testid="stAppViewContainer"] {{
         background-image: url('{st.session_state.fondo_base64}');
         background-size: cover;
         background-attachment: fixed;
         background-repeat: no-repeat;
+        background-position: center;
         position: relative;
         color: #111111;
     }}
@@ -3178,15 +3197,23 @@ if not os.path.exists(fondo_lateral_path) and os.path.exists("fondo_lateral.jpg"
 
 fondo_lateral_data = read_file_base64(fondo_lateral_path)
 fondo_lateral_base64 = fondo_lateral_data if fondo_lateral_data else None
+fondo_lateral_css = (
+    f"background-image: url('data:image/jpeg;base64,{fondo_lateral_base64}') !important;"
+    if fondo_lateral_base64 else ""
+)
 
 with st.sidebar:
     # Logo elegante - PROTAGONISTA
     try:
-        # Streamlit Cloud prefiere rutas relativas directas
-        if os.path.exists("image_6.png"):
-            col1, col2, col3 = st.columns([0.2, 5, 0.2])
+        logo_path = os.path.join(BASE_DIR, "image_6.png")
+        if not os.path.exists(logo_path) and os.path.exists("image_6.png"):
+            logo_path = "image_6.png"
+
+        logo_bytes = read_file_bytes(logo_path)
+        if logo_bytes:
+            col1, col2, col3 = st.columns([1, 3, 1])
             with col2:
-                st.image("image_6.png", use_container_width=True)
+                st.image(logo_bytes, width=120)
         else:
             st.markdown(f"<h3 style='text-align:center; font-size:3em;'><b>🏥</b></h3>", unsafe_allow_html=True)
     except Exception as e:
@@ -3194,7 +3221,7 @@ with st.sidebar:
     
     # Descripción de la app
     st.markdown("""
-    <div style='text-align: center; padding: 20px 10px; font-size: 0.9em; line-height: 1.6;'>
+    <div style='text-align: center; padding: 10px 8px; font-size: 0.82em; line-height: 1.4;'>
     <b>AmylAI 1.0</b> detecta amiloidosis cardíaca mediante inteligencia artificial. 
     Combina <b>pdfplumber</b> para extracción de texto, <b>LLMs locales</b> (vLLM/Ollama) para interpretación de datos clínicos, un <b>algoritmo diagnóstico experto basado en puntuación clínica</b>, y <b>Machine Learning</b> (RandomForest/scikit-learn) para validación estadística, clasificando el riesgo (AL, ATTR, HVI o Bajo) según evidencia científica. 
     Acelera el diagnóstico precoz de esta enfermedad infradiagnosticada, mejorando el pronóstico del paciente.
@@ -3233,39 +3260,73 @@ page_style = f"""
     }}
 
     /* Intensify main page background */
+    .stApp {{
+        {bg_img_css}
+        background-position: center !important;
+    }}
+
     [data-testid="stAppViewContainer"] {{
         background-color: #f4f6f8 !important;
         {bg_img_css}
+        background-position: center !important;
         color: #111111;
     }}
 
     /* Sidebar */
+    section[data-testid="stSidebar"] {{
+        overflow: visible !important;
+    }}
+
+    section[data-testid="stSidebar"] > div {{
+        height: 100vh !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+    }}
+
+    [data-testid="stSidebarContent"] {{
+        height: 100% !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        padding-bottom: 0.75rem !important;
+    }}
+
     [data-testid="stSidebar"] > div:first-child {{
         background: linear-gradient(180deg, rgba(20, 24, 28, 0.92), rgba(20, 24, 28, 0.96)) !important;
-        background-image: url('data:image/jpeg;base64,{fondo_lateral_base64}') !important;
+        {fondo_lateral_css}
         background-size: cover !important;
         background-position: center !important;
         background-repeat: no-repeat !important;
         backdrop-filter: blur(12px);
         color: #ffffff !important;
-        font-size: 1.1rem;
+        font-size: 0.95rem;
         font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Times New Roman', Georgia, serif !important;
+        height: 100vh !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        padding-bottom: 0.5rem !important;
+    }}
+
+    [data-testid="stSidebar"] .block-container {{
+        padding-top: 0.6rem !important;
+        padding-bottom: 0.6rem !important;
+        padding-left: 0.8rem !important;
+        padding-right: 0.8rem !important;
     }}
 
     /* Sidebar radio buttons styling */
     [data-testid="stSidebar"] [role="radiogroup"] {{
         background: rgba(255, 255, 255, 0.05) !important;
-        padding: 20px !important;
+        padding: 10px !important;
         border-radius: 8px !important;
         border: 1px solid rgba(255, 255, 255, 0.15) !important;
     }}
 
     [data-testid="stSidebar"] [role="radio"] {{
         color: #ffffff !important;
-        font-size: 1.3rem !important;
+        font-size: 0.95rem !important;
         font-weight: 600 !important;
-        padding: 12px 8px !important;
-        line-height: 1.5 !important;
+        padding: 7px 6px !important;
+        line-height: 1.25 !important;
     }}
 
     [data-testid="stSidebar"] [role="radio"]:hover {{
@@ -3277,7 +3338,7 @@ page_style = f"""
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
     [data-testid="stSidebar"] h4, [data-testid="stSidebar"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span {{
         color: #ffffff !important;
-        font-size: 1.05rem !important;
+        font-size: 0.9rem !important;
         font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Times New Roman', Georgia, serif !important;
         letter-spacing: 0.2px;
     }}
@@ -3309,7 +3370,7 @@ page_style = f"""
     /* Fix input text color in sidebar */
     [data-testid="stSidebar"] input {{
         color: #ffffff !important;
-        font-size: 1.05rem !important;
+        font-size: 0.9rem !important;
         font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Times New Roman', Georgia, serif !important;
         background-color: rgba(255, 255, 255, 0.08) !important;
         border: 1px solid rgba(255, 255, 255, 0.2) !important;
