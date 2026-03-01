@@ -3172,19 +3172,21 @@ tab_labels = [
 ]
 
 fondo_lateral_path = os.path.join(BASE_DIR, "fondo_lateral.jpg")
+# Streamlit Cloud: intentar ruta relativa si BASE_DIR falla
+if not os.path.exists(fondo_lateral_path) and os.path.exists("fondo_lateral.jpg"):
+    fondo_lateral_path = "fondo_lateral.jpg"
+
 fondo_lateral_data = read_file_base64(fondo_lateral_path)
 fondo_lateral_base64 = fondo_lateral_data if fondo_lateral_data else None
 
 with st.sidebar:
     # Logo elegante - PROTAGONISTA
     try:
-        logo_path = os.path.join(BASE_DIR, "image_6.png")
-        logo_bytes = read_file_bytes(logo_path)
-        if logo_bytes:
-            # Logo centrado y mas grande
+        # Streamlit Cloud prefiere rutas relativas directas
+        if os.path.exists("image_6.png"):
             col1, col2, col3 = st.columns([0.2, 5, 0.2])
             with col2:
-                st.image(logo_bytes, use_container_width=True)
+                st.image("image_6.png", use_container_width=True)
         else:
             st.markdown(f"<h3 style='text-align:center; font-size:3em;'><b>🏥</b></h3>", unsafe_allow_html=True)
     except Exception as e:
