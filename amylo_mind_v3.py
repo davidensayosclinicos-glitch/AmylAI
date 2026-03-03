@@ -1,3 +1,4 @@
+
 import streamlit as st
 import re
 import os
@@ -44,15 +45,54 @@ def optimizar_imagen_ocr(pil_img: Image.Image) -> Image.Image:
     """
     # Convertir a escala de grises
     img_gray = pil_img.convert('L')
-    
+
     # Mejorar contraste
     enhancer = ImageEnhance.Contrast(img_gray)
-    img_enhanced = enhancer.enhance(1.5)
-    
-    # Mejorar nitidez
-    img_sharp = img_enhanced.filter(ImageFilter.SHARPEN)
-    
+    img_enhanced = enhancer.enhance(1.8)
+
+    # Reducir ruido + nitidez
+    img_denoised = img_enhanced.filter(ImageFilter.MedianFilter(size=3))
+    img_sharp = img_denoised.filter(ImageFilter.SHARPEN)
+
     return img_sharp
+
+def limpiar_texto_extraido(texto: str) -> str:
+    """Limpia artefactos frecuentes de extracción OCR/PDF sin alterar contenido clínico."""
+    if not texto:
+        return ""
+
+    t = texto.replace("\r", "\n")
+    t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+def extraer_texto_nativo_pagina(page) -> str:
+    """Intenta extraer texto con pdfplumber priorizando fidelidad antes de OCR."""
+    try:
+        texto = page.extract_text(layout=True, x_tolerance=2, y_tolerance=2)
+        if texto and len(texto.strip()) > 5:
+            return limpiar_texto_extraido(texto)
+    except Exception:
+        pass
+
+    try:
+        texto = page.extract_text()
+        if texto and len(texto.strip()) > 5:
+            return limpiar_texto_extraido(texto)
+    except Exception:
+        pass
+
+    try:
+        words = page.extract_words(use_text_flow=True, keep_blank_chars=False)
+        if words:
+            texto = " ".join(w.get("text", "") for w in words if w.get("text"))
+            if texto and len(texto.strip()) > 5:
+                return limpiar_texto_extraido(texto)
+    except Exception:
+        pass
+
+    return ""
 
 def ocr_rapido_pagina(page_num: int, page, timeout_ocr: float = 15.0) -> tuple:
     """
@@ -62,30 +102,41 @@ def ocr_rapido_pagina(page_num: int, page, timeout_ocr: float = 15.0) -> tuple:
     start = time.time()
     
     try:
-        # Intentar extraer texto primero (rápido)
-        raw_text = page.extract_text()
+        # Intentar extracción nativa primero (más fiel cuando hay capa de texto)
+        raw_text = extraer_texto_nativo_pagina(page)
         if raw_text and len(raw_text.strip()) > 5:
             return (page_num, raw_text, time.time() - start)
-        
-        # Si no hay texto, usar OCR con resolución reducida
-        # Resolución 150 es mucho más rápido que 300, con buena calidad
-        page_image = page.to_image(resolution=150)
-        pil_img = page_image.original
-        
-        # Optimizar imagen
-        pil_img_opt = optimizar_imagen_ocr(pil_img)
-        
-        # OCR con settings optimizados para rapidez
-        ocr_text = pytesseract.image_to_string(
-            pil_img_opt, 
-            lang='spa',
-            config='--psm 6'  # Trata imagen como un solo bloque uniforme (rápido)
-        )
-        
-        if ocr_text and len(ocr_text.strip()) > 5:
-            return (page_num, ocr_text, time.time() - start)
-        else:
-            return (page_num, "", time.time() - start)
+
+        # Si no hay texto, OCR multi-estrategia para mejorar calidad
+        best_text = ""
+        best_score = 0
+
+        for resolution in (200, 300):
+            page_image = page.to_image(resolution=resolution)
+            pil_img = page_image.original
+            pil_img_opt = optimizar_imagen_ocr(pil_img)
+
+            for psm in (6, 4, 11):
+                try:
+                    ocr_text = pytesseract.image_to_string(
+                        pil_img_opt,
+                        lang='spa+eng',
+                        config=f'--oem 1 --psm {psm}',
+                        timeout=timeout_ocr
+                    )
+                except Exception:
+                    continue
+
+                ocr_text = limpiar_texto_extraido(ocr_text)
+                if not ocr_text:
+                    continue
+
+                score = len(re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñ0-9]", ocr_text))
+                if score > best_score:
+                    best_score = score
+                    best_text = ocr_text
+
+        return (page_num, best_text, time.time() - start)
             
     except Exception as e:
         return (page_num, f"[ERROR OCR: {str(e)[:50]}]", time.time() - start)
@@ -97,8 +148,15 @@ def procesar_pdf_paralelo(pdf, max_workers: int = 4) -> tuple:
     """
     texto_completo = ""
     tiempos = {}
+    textos_por_pagina = {}
+    total_paginas = len(pdf.pages)
+
+    if total_paginas == 0:
+        return "", {}
+
+    workers = max(1, min(max_workers, total_paginas))
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         # Enviar todas las páginas a procesar en paralelo
         futures = {executor.submit(ocr_rapido_pagina, i, page): i 
                    for i, page in enumerate(pdf.pages)}
@@ -108,10 +166,14 @@ def procesar_pdf_paralelo(pdf, max_workers: int = 4) -> tuple:
             try:
                 page_num, ocr_texto, tiempo_proc = future.result()
                 if ocr_texto and not ocr_texto.startswith("[ERROR"):
-                    texto_completo += ocr_texto + "\n"
+                    textos_por_pagina[page_num] = ocr_texto
                 tiempos[page_num] = tiempo_proc
             except Exception as e:
                 print(f"Error procesando página en paralelo: {e}")
+
+    # Reconstruir texto en el orden correcto del documento
+    for page_num in sorted(textos_por_pagina.keys()):
+        texto_completo += textos_por_pagina[page_num] + "\n"
     
     return texto_completo, tiempos
 
@@ -292,7 +354,8 @@ def generar_resumen_hallazgos(datos: Dict[str, Any], resultado: Dict[str, Any]) 
     # HALLAZGOS CARDIACOS
     if datos.get('ivs'): hallazgos_cardiacos.append(f"Grosor de pared VI: {datos['ivs']} mm")
     if datos.get('gls'): hallazgos_cardiacos.append(f"GLS (strain global): {datos['gls']}%")
-    if datos.get('volt'): hallazgos_cardiacos.append(f"Voltaje en ECG: {datos['volt']} mV")
+    volt_guardado = safe_float(datos.get('volt', 0))
+    hallazgos_cardiacos.append(f"Voltaje en ECG: {volt_guardado} mV" if volt_guardado > 0 else "Voltaje en ECG: No reportado")
     if datos.get('apical_sparing'): hallazgos_cardiacos.append("Apical sparing (muy sugestivo de ATTR)")
     if datos.get('bajo_voltaje'): hallazgos_cardiacos.append("Bajo voltaje paradójico")
     if datos.get('bav_mp'): hallazgos_cardiacos.append("Bloqueo AV completo / Marcapasos")
@@ -406,9 +469,9 @@ def generar_resumen_hallazgos(datos: Dict[str, Any], resultado: Dict[str, Any]) 
             resumen += f"• {h}\n"
         
         # INTERPRETACIÓN ESPECÍFICA DE PARÁMETROS
-        ivs = datos.get('ivs', 0)
-        gls = datos.get('gls', 0)
-        volt = datos.get('volt', 0)
+        ivs = safe_float(datos.get('ivs', 0))
+        gls = safe_float(datos.get('gls', 0))
+        volt = safe_float(datos.get('volt', 0))
         
         resumen += "\n**Interpretación:**\n"
         
@@ -424,9 +487,9 @@ def generar_resumen_hallazgos(datos: Dict[str, Any], resultado: Dict[str, Any]) 
         else:
             resumen += f"- GLS ({gls}%): Disfunción longitudinal severa\n"
         
-        if volt < 0.5:
+        if volt > 0 and volt < 0.5:
             resumen += f"- Voltaje ({volt} mV): Bajo voltaje paradójico (amiloidosis)\n"
-        elif volt < 1.0:
+        elif volt > 0 and volt < 1.0:
             resumen += f"- Voltaje ({volt} mV): Reducido\n"
         
         resumen += "\n"
@@ -541,10 +604,12 @@ def extraer_redflags_detectados(datos: Dict[str, Any]) -> Dict[str, list]:
     if datos.get('troponina_cronica'): redflags["HALLAZGOS_CARDIACOS"].append("Troponina elevada crónica baja (ATTR)")
     
     # PARÁMETROS CARDIACOS NUMÉRICOS
-    ivs = datos.get('ivs', 0)
-    gls = datos.get('gls', 0)
-    volt = datos.get('volt', 0)
-    ecv = datos.get('ecv', 0)
+    ivs = safe_float(datos.get('ivs', 0))
+    gls = safe_float(datos.get('gls', 0))
+    volt_raw = datos.get('volt', 0)
+    volt = safe_float(volt_raw)
+    volt_informado = str(volt_raw).strip().lower() not in ('', '0', '0.0', 'none', 'nan') and volt > 0
+    ecv = safe_float(datos.get('ecv', 0))
     
     if ivs > 15:
         redflags["PARAMETROS_CARDIACOS"].append(f"IVS muy aumentado: {ivs} mm (muy específico ATTR)")
@@ -554,9 +619,9 @@ def extraer_redflags_detectados(datos: Dict[str, Any]) -> Dict[str, list]:
     if gls < -9:
         redflags["PARAMETROS_CARDIACOS"].append(f"GLS anormal: {gls}%")
     
-    if volt < 0.5:
+    if volt_informado and volt < 0.5:
         redflags["PARAMETROS_CARDIACOS"].append(f"Voltaje muy bajo: {volt} mV (CRÍTICO: amiloidosis)")
-    elif volt < 1.0:
+    elif volt_informado and volt < 1.0:
         redflags["PARAMETROS_CARDIACOS"].append(f"Voltaje bajo: {volt} mV")
     
     if ecv > 40:
@@ -919,6 +984,12 @@ def save_case_training(datos: Dict[str, Any], diagnostico: str, confianza_ia: fl
 
 def generar_resumen_guardado(id_caso: str, datos: Dict[str, Any], diagnostico: str) -> str:
     """Genera un resumen formateado de lo que se acaba de guardar"""
+    ivs_guardado = safe_float(datos.get('ivs', 0))
+    gls_guardado = safe_float(datos.get('gls', 0))
+    volt_guardado = safe_float(datos.get('volt', 0))
+    ntprobnp_guardado = safe_float(datos.get('nt_probnp', 0))
+    ecv_guardado = safe_float(datos.get('ecv', 0))
+
     resumen = f"""
     ### ✅ RESUMEN DE GUARDADO DEL CASO
     
@@ -931,18 +1002,18 @@ def generar_resumen_guardado(id_caso: str, datos: Dict[str, Any], diagnostico: s
     - **Sexo:** {'Masculino' if datos.get('sexo') == 'M' else 'Femenino' if datos.get('sexo') == 'F' else '—'}
     
     #### Parámetros Cardiacos:
-    - **IVS/Septo:** {datos.get('ivs', 0)} mm
-    - **GLS/Strain:** {datos.get('gls', 0)} %
-    - **Voltaje ECG:** {datos.get('volt', 0)} mV
+    - **IVS/Septo:** {f"{ivs_guardado} mm" if ivs_guardado > 0 else 'No reportado'}
+    - **GLS/Strain:** {f"{gls_guardado} %" if gls_guardado != 0 else 'No reportado'}
+    - **Voltaje ECG:** {f"{volt_guardado} mV" if volt_guardado > 0 else 'No reportado'}
     - **Pared Posterior:** {datos.get('septum_posterior', 0)} mm
     
     #### Biomarcadores:
-    - **NT-proBNP:** {datos.get('nt_probnp', 0)} pg/ml
+    - **NT-proBNP:** {f"{ntprobnp_guardado} pg/ml" if ntprobnp_guardado > 0 else 'No reportado'}
     - **Troponina Elevada:** {'✓ Sí' if datos.get('troponina') else 'No'}
     
     #### Resonancia Cardíaca:
     - **Patrón LGE:** {datos.get('lge_patron', '—').upper()}
-    - **ECV:** {datos.get('ecv', 0)} %
+    - **ECV:** {f"{ecv_guardado} %" if ecv_guardado > 0 else 'No reportado'}
     - **T1 Mapping Elevado:** {'✓ Sí' if datos.get('t1_mapping') else 'No'}
     
     #### Red Flags Detectados:
@@ -2092,11 +2163,16 @@ def generar_diagnostico_por_llm(datos: Dict[str, Any]) -> Dict[str, Any]:
     resumen_items = []
     resumen_items.append(f"Edad: {datos.get('edad', 'N/A')}")
     resumen_items.append(f"Sexo: {datos.get('sexo', 'N/A')}")
-    resumen_items.append(f"IVS: {datos.get('ivs', 'N/A')}")
-    resumen_items.append(f"GLS: {datos.get('gls', 'N/A')}")
-    resumen_items.append(f"Volt: {datos.get('volt', 'N/A')}")
-    resumen_items.append(f"NT-proBNP: {datos.get('nt_probnp', 'N/A')}")
-    resumen_items.append(f"ECV: {datos.get('ecv', 'N/A')}")
+    ivs_prompt = safe_float(datos.get('ivs', 0))
+    gls_prompt = safe_float(datos.get('gls', 0))
+    volt_prompt = safe_float(datos.get('volt', 0))
+    ntprobnp_prompt = safe_float(datos.get('nt_probnp', 0))
+    ecv_prompt = safe_float(datos.get('ecv', 0))
+    resumen_items.append(f"IVS: {ivs_prompt if ivs_prompt > 0 else 'No reportado'}")
+    resumen_items.append(f"GLS: {gls_prompt if gls_prompt != 0 else 'No reportado'}")
+    resumen_items.append(f"Volt: {volt_prompt if volt_prompt > 0 else 'No reportado'}")
+    resumen_items.append(f"NT-proBNP: {ntprobnp_prompt if ntprobnp_prompt > 0 else 'No reportado'}")
+    resumen_items.append(f"ECV: {ecv_prompt if ecv_prompt > 0 else 'No reportado'}")
 
     # Añadir red flags positivos (lista de claves con valor verdadero/1)
     rf_keys = [k for k in datos.keys() if k in DEFAULT_DATA and k not in ['edad','sexo','ivs','gls','volt','nt_probnp','ecv','confianza_ia','modelo_usado']]
@@ -2117,7 +2193,12 @@ def generar_diagnostico_por_llm(datos: Dict[str, Any]) -> Dict[str, Any]:
         return {'diagnostico_llm': normalizar_diagnostico_llm(diag), 'confianza_llm': 0.0}
 
     try:
-        resp = client.chat.completions.create(model=llm_model, messages=[{"role": "user", "content": prompt}])
+        resp = client.chat.completions.create(
+            model=llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            top_p=1,
+        )
         text = ''
         try:
             text = resp.choices[0].message.content.strip()
@@ -2927,6 +3008,219 @@ modelo_ml, clases_ml = entrenar_modelo_ia()
 if isinstance(modelo_ml, str):
     modelo_ml = None
     clases_ml = None
+
+ENSAMBLE_CATEGORIAS = [
+    "ALTA SOSPECHA (AL)",
+    "ALTA PROBABILIDAD (ATTR)",
+    "INTERMEDIA (Screening)",
+    "HVI No Amiloide",
+    "BAJA / SANO",
+]
+
+ENSAMBLE_ESTILOS = {
+    "ALTA SOSPECHA (AL)": {
+        "color": "#d32f2f",
+        "msg": "🚨 Alta sospecha de amiloidosis AL por consenso clínico-IA.",
+        "accion": "Derivación URGENTE a Hematología + estudio de cadenas ligeras y biopsia según contexto."
+    },
+    "ALTA PROBABILIDAD (ATTR)": {
+        "color": "#c62828",
+        "msg": "✅ Alta probabilidad de ATTR por consenso clínico-IA.",
+        "accion": "Confirmar con gammagrafía ósea (Tc-99m DPD/PyP) ± estudio genético/biopsia."
+    },
+    "INTERMEDIA (Screening)": {
+        "color": "#f57c00",
+        "msg": "⚠️ Sospecha moderada. Requiere pruebas complementarias.",
+        "accion": "Completar Cardio-RM, biomarcadores y algoritmo diferencial."
+    },
+    "HVI No Amiloide": {
+        "color": "#1976d2",
+        "msg": "💙 Fenotipo hipertrófico probablemente no amiloide.",
+        "accion": "Optimizar control de HTA/valvulopatía y reevaluar si aparecen red flags."
+    },
+    "BAJA / SANO": {
+        "color": "#388e3c",
+        "msg": "✅ Baja probabilidad de cardiopatía infiltrativa.",
+        "accion": "Seguimiento clínico habitual."
+    }
+}
+
+
+def normalizar_categoria_diagnostico(texto: Any) -> str:
+    """Mapea texto libre de diagnóstico a una categoría canónica de ensamble."""
+    if not texto:
+        return "BAJA / SANO"
+
+    t = str(texto).strip().upper()
+
+    if "ALTA SOSPECHA (AL)" in t:
+        return "ALTA SOSPECHA (AL)"
+    if "ALTA PROBABILIDAD (ATTR)" in t:
+        return "ALTA PROBABILIDAD (ATTR)"
+    if "INTERMEDIA" in t:
+        return "INTERMEDIA (Screening)"
+    if "HVI" in t or "HIPERTROF" in t:
+        return "HVI No Amiloide"
+    if "BAJA" in t or "SANO" in t or "CONTROL" in t:
+        return "BAJA / SANO"
+
+    # Variantes frecuentes
+    if "ATTR" in t:
+        return "ALTA PROBABILIDAD (ATTR)"
+    if " AL " in f" {t} " or ("AL" in t and ("SOSPECHA" in t or "PROB" in t)):
+        return "ALTA SOSPECHA (AL)"
+
+    return "BAJA / SANO"
+
+
+def obtener_probabilidades_ml_por_categoria(datos: Dict[str, Any]) -> Dict[str, Any]:
+    """Calcula probabilidades ML agregadas por categoría canónica de ensamble."""
+    if modelo_ml is None:
+        return {
+            "disponible": False,
+            "categoria_top": None,
+            "proba_categoria": {},
+            "clase_top_original": None,
+        }
+
+    try:
+        fila = {}
+        for feature in FEATURES:
+            valor = datos.get(feature, DEFAULT_DATA.get(feature, 0))
+            if isinstance(valor, bool):
+                fila[feature] = int(valor)
+            else:
+                fila[feature] = pd.to_numeric(valor, errors='coerce')
+
+        X_pred = pd.DataFrame([fila], columns=FEATURES).fillna(0)
+
+        probas = modelo_ml.predict_proba(X_pred)[0]
+        clases = list(modelo_ml.classes_)
+
+        proba_categoria = {c: 0.0 for c in ENSAMBLE_CATEGORIAS}
+        for clase, proba in zip(clases, probas):
+            cat = normalizar_categoria_diagnostico(clase)
+            proba_categoria[cat] = proba_categoria.get(cat, 0.0) + float(proba)
+
+        categoria_top = max(proba_categoria, key=proba_categoria.get) if proba_categoria else None
+        idx_top = int(np.argmax(probas)) if len(probas) > 0 else 0
+        clase_top_original = str(clases[idx_top]) if clases else ""
+
+        return {
+            "disponible": True,
+            "categoria_top": categoria_top,
+            "proba_categoria": proba_categoria,
+            "clase_top_original": clase_top_original,
+        }
+    except Exception:
+        return {
+            "disponible": False,
+            "categoria_top": None,
+            "proba_categoria": {},
+            "clase_top_original": None,
+        }
+
+
+def calcular_ensamble_experto_ml_llm(datos: Dict[str, Any], usar_llm: bool = True) -> Dict[str, Any]:
+    """Ensamble ponderado real: Experto + ML + LLM (pesos dinámicos por disponibilidad)."""
+    res_experto = calcular_riesgo_experto(datos)
+    cat_experto = normalizar_categoria_diagnostico(res_experto.get("nivel", ""))
+
+    votos = {c: 0.0 for c in ENSAMBLE_CATEGORIAS}
+    componentes = {}
+
+    peso_experto = 0.50
+    peso_ml = 0.25
+    peso_llm = 0.25
+    peso_total = 0.0
+
+    # Experto (siempre)
+    votos[cat_experto] += peso_experto
+    peso_total += peso_experto
+    componentes["experto"] = {
+        "peso": peso_experto,
+        "categoria": cat_experto,
+        "confianza": float(safe_float(res_experto.get("confianza_porcentaje", 50.0))),
+    }
+
+    # ML
+    ml_info = obtener_probabilidades_ml_por_categoria(datos)
+    if ml_info.get("disponible", False):
+        proba_cat = ml_info.get("proba_categoria", {})
+        for cat, proba in proba_cat.items():
+            votos[cat] += peso_ml * float(proba)
+        peso_total += peso_ml
+        componentes["ml"] = {
+            "peso": peso_ml,
+            "categoria": ml_info.get("categoria_top"),
+            "clase_modelo": ml_info.get("clase_top_original"),
+            "probabilidades": proba_cat,
+        }
+    else:
+        componentes["ml"] = {
+            "peso": 0.0,
+            "categoria": None,
+            "clase_modelo": None,
+            "probabilidades": {},
+        }
+
+    # LLM
+    cat_llm = None
+    etiqueta_llm = "No usado"
+    if usar_llm:
+        try:
+            llm_out = generar_diagnostico_por_llm(datos)
+            etiqueta_llm = llm_out.get("diagnostico_llm", "")
+        except Exception:
+            etiqueta_llm = diagnostico_ia(datos)
+
+        cat_llm = normalizar_categoria_diagnostico(etiqueta_llm)
+        votos[cat_llm] += peso_llm
+        peso_total += peso_llm
+
+    componentes["llm"] = {
+        "peso": peso_llm if usar_llm else 0.0,
+        "categoria": cat_llm,
+        "etiqueta": etiqueta_llm,
+        "usado": bool(usar_llm),
+    }
+
+    if peso_total <= 0:
+        peso_total = 1.0
+
+    votos_norm = {cat: (valor / peso_total) for cat, valor in votos.items()}
+    categoria_final = max(votos_norm, key=votos_norm.get)
+    fuerza_consenso = float(votos_norm.get(categoria_final, 0.0)) * 100.0
+
+    res_final = dict(res_experto)
+    estilo = ENSAMBLE_ESTILOS.get(categoria_final, ENSAMBLE_ESTILOS["BAJA / SANO"])
+
+    # Si el consenso difiere del experto, sobreescribir etiqueta/estilo
+    if categoria_final != cat_experto:
+        res_final["nivel"] = categoria_final
+        res_final["color"] = estilo["color"]
+        res_final["msg"] = estilo["msg"]
+        res_final["accion"] = estilo["accion"]
+
+    # Confianza final combinada: confianza experto + fuerza de consenso del ensamble
+    conf_experto = float(safe_float(res_experto.get("confianza_porcentaje", 50.0)))
+    confianza_final = max(40.0, min(99.0, (0.6 * conf_experto) + (0.4 * fuerza_consenso)))
+
+    evidencia_base = res_final.get("evidencia", "")
+    evidencia_ensamble = (
+        f"Ensamble: experto={componentes['experto']['categoria']}"
+        f", ml={componentes['ml']['categoria'] or 'N/D'}"
+        f", llm={componentes['llm']['categoria'] or 'N/D'}"
+    )
+
+    res_final["confianza_porcentaje"] = round(confianza_final, 1)
+    res_final["evidencia"] = f"{evidencia_base} | {evidencia_ensamble}".strip(" |")
+    res_final["componentes_ensamble"] = componentes
+    res_final["votos_ensamble"] = votos_norm
+    res_final["categoria_ensamble"] = categoria_final
+    res_final["fuerza_consenso"] = round(fuerza_consenso, 1)
+
+    return res_final
 
 # ==========================================
 # PESTAÑA DE VALIDACIÓN (FILTRADO INTERMEDIOS)
@@ -3888,11 +4182,12 @@ if selected_tab == "Lote de PDFs":
         # Generar tabla de resultados
         res_indiv = []
         for item in extracciones:
-            riesgo = calcular_riesgo_experto(item['datos'])
+            riesgo = calcular_ensamble_experto_ml_llm(item['datos'], usar_llm=True)
             res_indiv.append({
                 "📄 Documento": item['documento'],
                 "🎯 Diagnóstico": riesgo['nivel'],
                 "📊 Score": riesgo['score'],
+                "🤝 Consenso": f"{riesgo.get('fuerza_consenso', 0.0):.1f}%",
                 "📝 Hallazgos": ", ".join(riesgo['hallazgos'][:2]) + ("..." if len(riesgo['hallazgos']) > 2 else "")
             })
         
@@ -3923,7 +4218,7 @@ if selected_tab == "Lote de PDFs":
         
         with col_diag:
             st.markdown("#### 🤖 Diagnóstico Fusionado")
-            res_batch = calcular_riesgo_experto(st.session_state.consolidado_batch)
+            res_batch = calcular_ensamble_experto_ml_llm(st.session_state.consolidado_batch, usar_llm=True)
             
             st.markdown(f"""
             <div style="
@@ -3941,6 +4236,31 @@ if selected_tab == "Lote de PDFs":
                 </p>
             </div>
             """, unsafe_allow_html=True)
+
+            componentes_b = res_batch.get('componentes_ensamble', {})
+            votos_b = res_batch.get('votos_ensamble', {})
+            if componentes_b:
+                st.markdown("##### 🧠 Desglose Ensamble")
+                filas_comp_b = []
+                for nombre in ['experto', 'ml', 'llm']:
+                    comp = componentes_b.get(nombre, {})
+                    filas_comp_b.append({
+                        'Componente': nombre.upper(),
+                        'Peso': round(float(comp.get('peso', 0.0)), 2),
+                        'Categoría': comp.get('categoria') or 'N/D'
+                    })
+                st.dataframe(pd.DataFrame(filas_comp_b), use_container_width=True, hide_index=True)
+
+            if votos_b:
+                filas_votos_b = [
+                    {'Categoría': cat, 'Voto Normalizado': round(float(valor) * 100.0, 1)}
+                    for cat, valor in sorted(votos_b.items(), key=lambda x: x[1], reverse=True)
+                ]
+                st.dataframe(pd.DataFrame(filas_votos_b), use_container_width=True, hide_index=True)
+                st.caption(
+                    f"Consenso final: {res_batch.get('categoria_ensamble', res_batch.get('nivel', 'N/D'))} "
+                    f"({res_batch.get('fuerza_consenso', 0.0)}%)"
+                )
             
             st.markdown("#### 🧠 Análisis del Asistente")
             explicacion = generar_explicacion_narrativa(st.session_state.consolidado_batch, res_batch)
@@ -3974,6 +4294,7 @@ if selected_tab == "Lote de PDFs":
 # -------------------------------------------------------------------------------------
 elif selected_tab == "Caso Individual":
     st.markdown("### 🩺 Análisis Detallado de Caso Individual")
+    st.info("Build UI activo: 2026-03-03 · LM complementaria + Desglose de Confianza", icon="🧩")
     st.markdown("Completa la información del paciente para un diagnóstico preciso")
     st.divider()
     
@@ -4585,8 +4906,29 @@ elif selected_tab == "Caso Individual":
     
     with right_col:
         st.markdown("## 🎯 Resultado del Análisis")
-        
-        res_ind = calcular_riesgo_experto(st.session_state.form_data)
+
+        # Ensamble Experto + ML + LLM con caché por hash de entrada
+        payload_ensamble = {f: st.session_state.form_data.get(f, DEFAULT_DATA.get(f, 0)) for f in FEATURES}
+        payload_hash = json.dumps(payload_ensamble, sort_keys=True, default=str)
+
+        if (
+            st.session_state.get("ensamble_payload_hash") != payload_hash
+            or "ensamble_resultado" not in st.session_state
+        ):
+            res_ensamble = calcular_ensamble_experto_ml_llm(payload_ensamble, usar_llm=True)
+            st.session_state.ensamble_payload_hash = payload_hash
+            st.session_state.ensamble_resultado = res_ensamble
+
+        res_ind = st.session_state.get("ensamble_resultado", calcular_riesgo_experto(st.session_state.form_data))
+
+        componentes_res = res_ind.get('componentes_ensamble', {})
+        comp_experto = componentes_res.get('experto', {}) if isinstance(componentes_res, dict) else {}
+        comp_llm = componentes_res.get('llm', {}) if isinstance(componentes_res, dict) else {}
+
+        decision_algoritmo = comp_experto.get('categoria') or normalizar_categoria_diagnostico(res_ind.get('nivel', ''))
+        decision_lm = comp_llm.get('etiqueta') or comp_llm.get('categoria') or 'No disponible'
+        decision_lm_categoria = normalizar_categoria_diagnostico(decision_lm) if decision_lm != 'No disponible' else ''
+        hay_concordancia_alg_lm = bool(decision_lm_categoria) and (decision_algoritmo == decision_lm_categoria)
         
         # Obtener confianza (con fallback)
         confianza = res_ind.get('confianza_porcentaje', 50.0)
@@ -4618,6 +4960,19 @@ elif selected_tab == "Caso Individual":
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        st.markdown("### 🤝 Decisión Complementaria LM")
+        col_dec1, col_dec2, col_dec3 = st.columns(3)
+        with col_dec1:
+            st.metric("Algoritmo (Experto)", decision_algoritmo)
+        with col_dec2:
+            st.metric("LM (complementaria)", decision_lm)
+        with col_dec3:
+            st.metric("Concordancia", "✅ Sí" if hay_concordancia_alg_lm else "⚠️ No")
+
+        st.session_state.decision_algoritmo = decision_algoritmo
+        st.session_state.decision_lm = decision_lm
+        st.session_state.concordancia_alg_lm = hay_concordancia_alg_lm
         
         # Acción recomendada
         if 'accion' in res_ind:
@@ -4657,6 +5012,61 @@ elif selected_tab == "Caso Individual":
                 f"{confianza:.1f}%",
                 help="Porcentaje de confianza del algoritmo de machine learning"
             )
+
+        # Desglose numérico de confianza
+        conf_experto_num = float(safe_float(componentes_res.get('experto', {}).get('confianza', 0.0)))
+        fuerza_consenso_num = float(safe_float(res_ind.get('fuerza_consenso', 0.0)))
+        confianza_ponderada = (0.6 * conf_experto_num) + (0.4 * fuerza_consenso_num)
+        confianza_limitada = max(40.0, min(99.0, confianza_ponderada))
+
+        st.markdown("### 🔢 Desglose de Confianza")
+        col_conf1, col_conf2, col_conf3, col_conf4 = st.columns(4)
+        with col_conf1:
+            st.metric("Conf. Experto", f"{conf_experto_num:.1f}%")
+        with col_conf2:
+            st.metric("Consenso", f"{fuerza_consenso_num:.1f}%")
+        with col_conf3:
+            st.metric("0.6E + 0.4C", f"{confianza_ponderada:.1f}%")
+        with col_conf4:
+            st.metric("Final mostrada", f"{confianza_limitada:.1f}%")
+
+        st.caption("Fórmula: confianza_final = max(40, min(99, 0.6×conf_experto + 0.4×fuerza_consenso))")
+
+        # Desglose del ensamble (Experto + ML + LLM)
+        componentes = res_ind.get('componentes_ensamble', {})
+        votos = res_ind.get('votos_ensamble', {})
+        if componentes:
+            st.markdown("### 🧠 Ensamble Diagnóstico")
+
+            filas_componentes = []
+            for nombre in ['experto', 'ml', 'llm']:
+                comp = componentes.get(nombre, {})
+                filas_componentes.append({
+                    'Componente': nombre.upper(),
+                    'Peso': round(float(comp.get('peso', 0.0)), 2),
+                    'Categoría': comp.get('categoria') or 'N/D',
+                })
+
+            st.dataframe(
+                pd.DataFrame(filas_componentes),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            if votos:
+                filas_votos = [
+                    {'Categoría': cat, 'Voto Normalizado': round(float(valor) * 100.0, 1)}
+                    for cat, valor in sorted(votos.items(), key=lambda x: x[1], reverse=True)
+                ]
+                st.dataframe(
+                    pd.DataFrame(filas_votos),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                st.caption(
+                    f"Consenso final: {res_ind.get('categoria_ensamble', res_ind.get('nivel', 'N/D'))} "
+                    f"({res_ind.get('fuerza_consenso', 0.0)}%)"
+                )
         
         # Hallazgos encontrados
         st.markdown("### 📋 Hallazgos Detectados")
@@ -4896,12 +5306,20 @@ elif selected_tab == "Caso Individual":
                 # Obtener confianza y nivel guardados durante el análisis
                 confianza_guardada = st.session_state.get('confianza_analisis', 0.0)
                 nivel_guardado = st.session_state.get('nivel_diagnostico', '')
+                decision_alg_guardada = st.session_state.get('decision_algoritmo', nivel_guardado)
+                decision_lm_guardada = st.session_state.get('decision_lm', 'No disponible')
+                concordancia_guardada = st.session_state.get('concordancia_alg_lm', False)
+
+                trazabilidad_modelo = (
+                    f"Ensamble E+ML+LM | Alg={decision_alg_guardada} | "
+                    f"LM={decision_lm_guardada} | Concordancia={'SI' if concordancia_guardada else 'NO'}"
+                )
                 
                 resultado = save_case_training(
                     st.session_state.form_data, 
                     diag_final,
                     confianza_ia=confianza_guardada,
-                    modelo_usado=nivel_guardado
+                    modelo_usado=trazabilidad_modelo
                 )
                 if resultado != "ERROR":
                     # Mostrar resumen completo de lo guardado
@@ -5387,7 +5805,7 @@ if selected_tab == "Base de Datos":
             
             try:
                 # Use default thresholds for Base de Datos calculation
-                res = calcular_riesgo_experto(d, umbral_screening=UMBRAL_SCREENING, umbral_confirmacion=UMBRAL_CONFIRMACION)
+                res = calcular_ensamble_experto_ml_llm(d, usar_llm=False)
                 nivel = res.get('nivel', '')
                 hall = ", ".join(res.get('hallazgos', []))
                 
@@ -5866,7 +6284,7 @@ if selected_tab == "Diagnóstico del Algoritmo":
                 
                 try:
                     # Ejecutar algoritmo
-                    res = calcular_riesgo_experto(d)
+                    res = calcular_ensamble_experto_ml_llm(d, usar_llm=False)
                     
                     # Guardar resultados
                     df_algoritmo.loc[idx, 'Diagnóstico Algoritmo'] = res.get('nivel', '')
@@ -5966,7 +6384,11 @@ if selected_tab == "Diagnóstico del Algoritmo":
         st.subheader("Distribución de Scores")
         scores = df_algoritmo['Score'].dropna()
         if len(scores) > 0:
-            st.histogram(scores, bins=20, x_label="Score", y_label="Frecuencia")
+            fig, ax = plt.subplots()
+            ax.hist(scores, bins=20)
+            ax.set_xlabel("Score")
+            ax.set_ylabel("Frecuencia")
+            st.pyplot(fig)
         else:
             st.info("Sin datos para mostrar")
     

@@ -1,0 +1,3 @@
+[TYPECHECK]
+# Evita falso positivo de astroid con NumPy en este proyecto.
+generated-members=RandomState
